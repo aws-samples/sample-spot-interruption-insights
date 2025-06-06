@@ -1,0 +1,978 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM template for deploying a OpenSearch domain in existing VPC along with other services like EC2, ALB, ASG to access the dashboards and EventBridge, SQS and Lambda to build a event driven Spot Interruption Monitoring and Analytics solution. 
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: spot-interruption-monitor
+    Description: "Domain name for the OpenSearch dashboard. Used in resource naming (e.g., <DomainName>-ALB). Use alphanumeric and hyphens only."
+  MasterUsername:
+    Type: String
+    Default: admin
+    Description: "Admin username for login to the OpenSearch dashboard."
+  MasterUserPassword:
+    Type: String
+    Description: "Admin password for login to the OpenSearch dashboard."
+    NoEcho: true
+  IndexName:
+    Type: String
+    Default: spot-interruption-events
+    Description: "OpenSearch Index name to store Spot interruption event data"
+  EventRuleName:
+    Type: String
+    Default: spot-interruption-events-handler
+    Description: "EventBridge Rule name"
+  CustomEventRuleName:
+    Type: String
+    Default: spot-interruption-events-custom
+    Description: "Custom EventBridge Rule name for testing"
+  TargetQueueName:
+    Type: String
+    Default: spot-interruption-events-targetqueue
+    Description: "EventBridge target Queue name"
+  SQSDLQQueueName:
+    Type: String
+    Default: spot-interruption-events-dlq
+    Description: "Dead Letter Queue name for target SQS."
+  LambdaDLQQueueName:
+    Type: String
+    Default: spot-interruption-events-lambdadlq
+    Description: "Dead Letter Queue name for Lambda function."
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: "ID of the existing VPC (e.g., vpc-12345678)"
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: "Comma-delimited list of at least two public subnet IDs in different AZs for ALB (e.g., subnet-12345678,subnet-87654321). Find in VPC > Subnets."
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: "Comma-delimited list of private subnet IDs in different AZs for OpenSearch and EC2 (e.g., subnet-abcdef12,subnet-21fedcba). Provide at least one subnet. OpenSearch uses 1 AZ for 1 subnet, 2 AZs for 2 subnets, 3 AZs for 3+ subnets."
+  RestrictedIPCidr:
+    Type: String
+    Description: "Your IP address / CIDR block for ALB access in CIDR format (e.g., x.x.x.x/32). Find your IP using 'curl ifconfig.me' or check https://www.whatismyipaddress.com."
+    AllowedPattern: ^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/32$
+    ConstraintDescription: "Must be a valid IP address in CIDR format (x.x.x.x/32)"
+  CertificateArn:
+    Type: String
+    Description: ARN of the SSL certificate in ACM
+  AMIId:
+    Type: String
+    Description: "AMI ID for EC2 instances (e.g., ami-0953476d60561c955 for Amazon Linux 2023). Must be compatible with t3.medium and the region."
+  
+Resources:
+  LambdaKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Lambda environment variables
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  SQSQueueKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for SQS queue encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Effect: Allow
+            Principal:
+              Service: sqs.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: "*"
+          - Sid: AllowEventBridgeToEncrypt
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+  
+  OpenSearchAuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/OpenSearch/${DomainName}/logs
+      RetentionInDays: 30
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  OpenSearchLogPublishingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${DomainName}-OpenSearchLogPublishingRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: es.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/OpenSearch/${DomainName}/audit:*
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+  
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${DomainName}-ec2     
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "es:ESHttp*"
+                Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${DomainName}/*
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  SQSAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${DomainName}-SQSAdminRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SQSAdminPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:SetQueueAttributes
+                  - sqs:GetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                  - sqs:ListQueueTags
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                Resource:
+                  - !GetAtt SpotInterruptionQueue.Arn
+                  - !GetAtt SpotInterruptionDLQ.Arn
+                  - !GetAtt ProcessSpotInterruptionLambdaDLQ.Arn
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${DomainName}-ALB-SG
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref RestrictedIPCidr
+          Description: Allow Restricted IP/CID to ALB
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  ALBSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt ALBSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref NginxSecurityGroup
+      Description: Allow HTTPS to NginxSecurityGroup
+  
+  NginxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${DomainName}-Nginx-SG
+      GroupDescription: Security group for Nginx instances
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow ALB to Nginx
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS to AWS service endpoints.
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+  
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${DomainName}-Lambda-SG
+      GroupDescription: Security group for Lambda function
+      VpcId: !Ref VPCId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS to AWS service endpoints
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  LambdaSecurityGroupEgressToOpenSearch:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt LambdaSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref OpenSearchSecurityGroup
+      Description: Allow HTTPS to OpenSearchSecurityGroup
+
+  LambdaSecurityGroupEgressToSQS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt LambdaSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref SQSVPCEndpointSecurityGroup
+      Description: Allow HTTPS to SQSVPCEndpointSecurityGroup
+  
+  OpenSearchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${DomainName}-OpenSearch-SG
+      GroupDescription: Security group for OpenSearch
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        SourceSecurityGroupId: !Ref NginxSecurityGroup
+        Description: Allow Nginx to OpenSearch
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        SourceSecurityGroupId: !Ref LambdaSecurityGroup
+        Description: Allow Lambda to OpenSearch  
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+        Description: Allow HTTPS to AWS service endpoints
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  OpenSearchLogsResourcePolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub ${DomainName}-OpenSearchLogsPolicy
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "es.amazonaws.com"
+              },
+              "Action": [
+                "logs:PutLogEvents",
+                "logs:CreateLogStream",
+                "logs:DescribeLogStreams"
+              ],
+              "Resource": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/OpenSearch/${DomainName}/logs:*"
+            }
+          ]
+        }
+      
+  OpenSearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    DependsOn:
+      - OpenSearchAuditLogGroup
+      - OpenSearchLogPublishingRole
+      - OpenSearchLogsResourcePolicy
+    Properties:
+      DomainName: !Ref DomainName
+      EngineVersion: OpenSearch_2.17
+      ClusterConfig:
+        InstanceType: r7g.large.search
+        InstanceCount: 3
+        ZoneAwarenessEnabled: true
+        ZoneAwarenessConfig:
+          AvailabilityZoneCount: 3
+        DedicatedMasterEnabled: true
+        DedicatedMasterType: m7g.large.search
+        DedicatedMasterCount: 3
+        WarmEnabled: false
+        ColdStorageOptions:
+          Enabled: false
+        MultiAZWithStandbyEnabled: true  
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 300
+        VolumeType: gp3
+      VPCOptions:
+        SubnetIds: !Ref PrivateSubnetIds
+        SecurityGroupIds:
+          - !Ref OpenSearchSecurityGroup
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      EncryptionAtRestOptions:
+        Enabled: true
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+        TLSSecurityPolicy: Policy-Min-TLS-1-2-2019-07
+        CustomEndpointEnabled: false
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: "es:*"
+            Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${DomainName}/*"
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          MasterUserName: !Ref MasterUsername
+          MasterUserPassword: !Ref MasterUserPassword
+      LogPublishingOptions:
+        ES_APPLICATION_LOGS:
+          CloudWatchLogsLogGroupArn: !GetAtt OpenSearchAuditLogGroup.Arn
+          Enabled: true
+        SEARCH_SLOW_LOGS:
+          CloudWatchLogsLogGroupArn: !GetAtt OpenSearchAuditLogGroup.Arn
+          Enabled: true
+        INDEX_SLOW_LOGS:
+          CloudWatchLogsLogGroupArn: !GetAtt OpenSearchAuditLogGroup.Arn
+          Enabled: true
+        AUDIT_LOGS:
+          CloudWatchLogsLogGroupArn: !GetAtt OpenSearchAuditLogGroup.Arn
+          Enabled: true
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  SQSVPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${DomainName}-SQSVPCEndpoint-SG
+      GroupDescription: Security group for SQS VPC Endpoint
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: Allow Lambda to SQSVPCEndpoint
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+  
+  SQSVPCEndpointSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt SQSVPCEndpointSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: Allow HTTPS response to LambdaSecurityGroup
+  
+  SQSVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sqs
+      VpcId: !Ref VPCId
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+        - !Ref SQSVPCEndpointSecurityGroup
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SpotInterruptionLambdaExecutionRole}
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+            Resource: "*"
+  
+        
+  SpotInterruptionDLQ:
+    Type: AWS::SQS::Queue
+    DependsOn:
+      - SQSQueueKMSKey
+    Properties:
+      QueueName: !Ref SQSDLQQueueName
+      VisibilityTimeout: 35
+      KmsMasterKeyId: !GetAtt SQSQueueKMSKey.Arn
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  SpotInterruptionQueue:
+    Type: AWS::SQS::Queue
+    DependsOn:
+      - SQSQueueKMSKey
+      - SpotInterruptionDLQ
+    Properties:
+      QueueName: !Ref TargetQueueName
+      VisibilityTimeout: 35
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SpotInterruptionDLQ.Arn
+        maxReceiveCount: 50
+      KmsMasterKeyId: !GetAtt SQSQueueKMSKey.Arn
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  ProcessSpotInterruptionLambdaDLQ:
+    Type: AWS::SQS::Queue
+    DependsOn:
+      - SQSQueueKMSKey
+    Properties:
+      QueueName: !Ref LambdaDLQQueueName
+      VisibilityTimeout: 35 
+      KmsMasterKeyId: !GetAtt SQSQueueKMSKey.Arn
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  SpotInterruptionQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SpotInterruptionQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgeToSendToSQS
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt SpotInterruptionQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${EventRuleName}
+                  - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${CustomEventRuleName}
+          - Sid: AllowLambdaUsageMain
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SpotInterruptionLambdaExecutionRole}
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+            Resource: !GetAtt SpotInterruptionQueue.Arn
+
+  SpotInterruptionDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SpotInterruptionDLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSQSMainToSend
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt SpotInterruptionDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt SpotInterruptionQueue.Arn
+
+  ProcessSpotInterruptionLambdaDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ProcessSpotInterruptionLambdaDLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLambdaToSendAndAccess
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+            Resource: !GetAtt ProcessSpotInterruptionLambdaDLQ.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !GetAtt ProcessSpotInterruptionLambda.Arn
+
+  SpotInterruptionLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    DependsOn:
+      - SQSQueueKMSKey
+      - LambdaKMSKey
+      - SpotInterruptionQueue
+      - ProcessSpotInterruptionLambdaDLQ
+    Properties:
+      RoleName: !Sub ${DomainName}-events-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${DomainName}-CloudWatchLogsScopedAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
+        - PolicyName: !Sub ${DomainName}-Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeAutoScalingInstances
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - events:PutEvents
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - es:ESHttp*
+                Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${DomainName}/*
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: 
+                  - !GetAtt SpotInterruptionQueue.Arn
+                  - !GetAtt ProcessSpotInterruptionLambdaDLQ.Arn
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  - !GetAtt SQSQueueKMSKey.Arn
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  SpotInterruptionLambdaDecryptPolicy:
+    DependsOn:
+      - SpotInterruptionLambdaExecutionRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AllowKMSDecryptForLambda
+      Roles:
+        - !Ref SpotInterruptionLambdaExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource: !GetAtt LambdaKMSKey.Arn
+
+
+  ProcessSpotInterruptionLambda:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - SpotInterruptionQueue
+      - ProcessSpotInterruptionLambdaDLQ
+      - SpotInterruptionLambdaExecutionRole
+      - LambdaSecurityGroup
+      - LambdaKMSKey
+    Properties:
+      FunctionName: !Sub ${DomainName}-process-spot-interruption-notices
+      Timeout: 30
+      MemorySize: 512
+      Runtime: python3.13
+      Handler: process-spot-interruption-notices.lambda_handler
+      CodeUri: ./src
+      ReservedConcurrentExecutions: 10
+      Layers:
+        - arn:aws:lambda:us-east-1:249628505353:layer:requests-aws4auth-layer:1
+      Environment:
+        Variables:
+          OPENSEARCH_HOST: !Sub "https://${OpenSearchDomain.DomainEndpoint}"
+          OPENSEARCH_INDEX_NAME: !Ref IndexName
+      Role: !GetAtt SpotInterruptionLambdaExecutionRole.Arn
+      KmsKeyArn: !GetAtt LambdaKMSKey.Arn
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SpotInterruptionQueue.Arn
+            BatchSize: 100
+            MaximumBatchingWindowInSeconds: 1
+            Enabled: true
+            ScalingConfig:
+              MaximumConcurrency: 10
+      DeadLetterQueue:
+        Type: "SQS"
+        TargetArn: !GetAtt ProcessSpotInterruptionLambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref PrivateSubnetIds
+      Architectures:
+        - x86_64
+      
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+    
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn:
+      - EC2InstanceRole
+      - NginxSecurityGroup
+    Properties:
+      LaunchTemplateName: !Sub ${DomainName}-LaunchTemplate
+      LaunchTemplateData:
+        ImageId: !Ref AMIId
+        InstanceRequirements:
+          VCpuCount:
+            Min: 2
+            Max: 4
+          MemoryMiB:
+            Min: 2048
+            Max: 4096
+        SecurityGroupIds:
+          - !Ref NginxSecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              Encrypted: true
+              VolumeSize: 8
+              VolumeType: gp3
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              exec > /var/log/user-data.log 2>&1
+              set -x
+
+              dnf update -y
+              dnf install nginx -y
+
+              openssl req -x509 -nodes -days 3650 \
+                -newkey rsa:2048 \
+                -keyout /etc/nginx/nginx.key \
+                -out /etc/nginx/nginx.crt \
+                -subj "/CN=${OpenSearchDomain.DomainEndpoint}"
+
+              # Log the value of OpenSearchDomain.DomainEndpoint for debugging
+              echo "OpenSearchDomain.DomainEndpoint: ${OpenSearchDomain.DomainEndpoint}" >> /var/log/user-data.log
+
+              cat << EOF > /etc/nginx/conf.d/opensearch.conf
+              server {
+                  listen 443 ssl;
+                  listen [::]:443;
+                  server_name ${OpenSearchDomain.DomainEndpoint};
+                  root /usr/share/nginx/html;
+
+                  ssl_certificate /etc/nginx/nginx.crt;
+                  ssl_certificate_key /etc/nginx/nginx.key;
+
+                  ssl_session_cache builtin:1000 shared:SSL:10m;
+                  ssl_protocols TLSv1.2 TLSv1.3;
+                  ssl_ciphers HIGH:!aNULL:!eNULL:!EXPORT:!CAMELLIA:!DES:!MD5:!PSK:!RC4;
+                  ssl_prefer_server_ciphers on;
+
+                  location /health {
+                      return 200 "Healthy";
+                      access_log off;
+                  }
+
+                  location / {
+                      proxy_pass https://${OpenSearchDomain.DomainEndpoint};
+                      proxy_set_header Host \$host;
+                      proxy_set_header X-Real-IP \$remote_addr;
+                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto \$scheme;
+                      proxy_set_header X-Forwarded-Host \$host;
+                      proxy_set_header X-Forwarded-Port \$server_port;
+
+                      # Ensure cookies are passed correctly
+                      proxy_cookie_path / /;
+                      proxy_buffering off;
+                      proxy_redirect off;
+                  }
+              }
+              EOF
+              systemctl enable nginx
+              systemctl start nginx
+
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: project
+                Value: spot-interruption-insights
+              - Key: auto-delete
+                Value: no
+        
+  
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - ALBSecurityGroup
+    Properties:
+      Name: !Sub ${DomainName}-ALB
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${DomainName}-TargetGroup
+      VpcId: !Ref VPCId
+      Port: 443
+      Protocol: HTTPS
+      TargetType: instance
+      HealthCheckProtocol: HTTPS
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: "200"
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: "3600"
+      Tags:
+        - Key: project
+          Value: spot-interruption-insights
+        - Key: auto-delete
+          Value: no  
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - ApplicationLoadBalancer
+      - ALBTargetGroup
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+  
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - LaunchTemplate
+      - ALBTargetGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${DomainName}-ASG
+      VPCZoneIdentifier: !Ref PrivateSubnetIds
+      MinSize: '0'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+          Overrides: []
+        InstancesDistribution:
+          OnDemandPercentageAboveBaseCapacity: 0
+          SpotAllocationStrategy: price-capacity-optimized
+          OnDemandAllocationStrategy: lowest-price
+      CapacityRebalance: true
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      InstanceMaintenancePolicy:
+        MaxHealthyPercentage: 200
+        MinHealthyPercentage: 100
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+    
+
+  SpotInterruptionRule:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - SpotInterruptionQueue
+    Properties:
+      Name: !Ref EventRuleName
+      EventPattern:
+        source:
+          - "aws.ec2"
+        detail-type:
+          - "EC2 Spot Instance Interruption Warning"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SpotInterruptionQueue.Arn
+          Id: "TargetForSpotInterruptionQueue"
+
+  SpotInterruptionCustomRule:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - SpotInterruptionQueue
+    Properties:
+      Name: !Ref CustomEventRuleName
+      EventPattern:
+        source:
+          - "custom.spot.interruption.simulator"
+        detail-type:
+          - "EC2 Spot Instance Interruption Warning"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SpotInterruptionQueue.Arn
+          Id: "TargetForSpotInterruptionQueue"        
+
+Outputs:
+  OpenSearchEndpoint:
+    Description: Endpoint of the OpenSearch domain
+    Value: !GetAtt OpenSearchDomain.DomainEndpoint
+  LambdaFunctionName:
+    Description: Name of the Lambda function processing Spot Interruption Notices
+    Value: !Ref ProcessSpotInterruptionLambda
+  QueueName:
+    Description: Name of the SQS queue receiving Spot Interruption events
+    Value: !Ref SpotInterruptionQueue
+  ALBEndpoint:
+    Description: Endpoint of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
