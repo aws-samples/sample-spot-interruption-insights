@@ -9,15 +9,18 @@ Spot Interruption Insights is a serverless, event-driven monitoring and analytic
 ![Diagram](/images/spot-interruption-insights.drawio.png)
 
 ## Solution Overview
-The architecture leverages a fully serverless, event-driven approach utilizing AWS native services for robust interruption monitoring. EC2 Spot interruption notices are captured via an Amazon EventBridge rule and routed to an SQS queue for reliable message handling. A Lambda function processes the events, fetching EC2 instance metadata and Auto Scaling Group (ASG) details by making optimized batch calls to the EC2 and Auto Scaling APIs. This design minimizes throttling risks on the control plane APIs, ensuring scalability. The Lambda function is appropriately configured with batching and concurrency limits to prevent overwhelming the API endpoints and the OpenSearch bulk indexing process. After processing, events are bulk-indexed into Amazon OpenSearch Service, enabling near real-time visibility and analytics. A Dead Letter Queue (DLQ) ensures no data is lost in case of failures, while IAM roles enforce least-privilege access between all components.
+The architecture leverages a serverless, event-driven approach utilizing AWS native services for robust interruption monitoring. EC2 Spot interruption notices are captured via an Amazon EventBridge rule and routed to an SQS queue for reliable message handling. A Lambda function processes the events, fetching EC2 instance metadata and Auto Scaling Group (ASG) details by making optimized batch calls to the EC2 and Auto Scaling APIs. This design minimizes throttling risks on the control plane APIs, ensuring scalability. The Lambda function is appropriately configured with batching and concurrency limits to prevent overwhelming the API endpoints and the OpenSearch bulk indexing process. After processing, events are bulk-indexed into Amazon OpenSearch Service, enabling near real-time visibility and analytics. A Dead Letter Queue (DLQ) ensures no data is lost in case of failures, while IAM roles enforce least-privilege access between all components.
 
 OpenSearch is deployed within the private subnets of a VPC, ensuring it is not publicly accessible. Access to OpenSearch Dashboards is routed through an Application Load Balancer (ALB) configured with an HTTPS listener, which forwards traffic to an NGINX proxy running on EC2 instances in an Auto Scaling group. This setup provides secure and scalable access. Authentication and authorization are enforced using OpenSearch’s internal user database, ensuring that only authorized users can access the dashboards. 
 
 OpenSearch Dashboards visualize interruption metrics, delivering actionable insights to support effective capacity planning and workload placement.
 
+### Extensibility and Alternative Analytics Tools
+While this solution uses Amazon OpenSearch Service for storing and visualizing Spot Interruption data, the architecture is flexible and can be extended to support other analytics and observability platforms. You can modify the Lambda function to forward data to tools such as Amazon QuickSight, Amazon Timestream, Amazon Redshift, or external services like Datadog, Splunk, or Elastic Cloud, depending on your analytics and compliance needs. This enables teams to use their preferred tooling for building visualizations, setting alerts, or integrating with existing dashboards.
+
 
 ## Important Note: 
-This application leverages multiple AWS services, and there are associated costs beyond the Free Tier usage. Please refer to the [AWS Pricing page](https://aws.amazon.com/pricing/) for specific details. You are accountable for any incurred AWS costs. This example solution does not imply any warranty.
+This application uses multiple AWS services, and there are associated costs beyond the Free Tier usage. Please refer to the [AWS Pricing page](https://aws.amazon.com/pricing/) for specific details. You are accountable for any incurred AWS costs. This example solution does not imply any warranty.
 
 ## Requirements
 [Create an AWS account](https://portal.aws.amazon.com/gp/aws/developer/registration/index.html) if you do not already have one and log in. The IAM user that you use must have sufficient permissions to make necessary AWS service calls and manage AWS resources.  
@@ -44,7 +47,7 @@ This section lists the required setup and configurations **before** deploying th
 - **Private Subnets (2 or more) -**  Configure **two or more** private subnet IDs from **different Availability Zones**.
 - **Outbound Internet Access for Private Subnets -**  Ensure NAT Gateway access as nginx proxy will be installed on EC2 instance in private subnet.
 - **ALB Access -** CIDR IP range allowed to access ALB (e.g., `1.2.3.4/32`). This is for accessing the dashboard.
-- **Certificate ARN for ALB HTTPS Listner -** To configure HTTPS listner.     
+- **Certificate ARN for ALB HTTPS Listner -** To configure HTTPS listener.     
 - **AMIId -** Valid EC2 AMI ID for the region.  
 
 Before deploying the solution, ensure that the required Lambda layer containing the requests_aws4auth package is published. This package is essential for AWS request signing, allowing the Lambda function to authenticate API calls made to AWS services such as EC2 and OpenSearch.
@@ -322,10 +325,6 @@ This solution is designed to be secure and cost-efficient by default, but there 
 - **Optimize Visualizations:** Design saved visualizations to avoid expensive queries (like wide time ranges and large aggregations).
 
 - **Index Lifecycle Management (ILM) :** Configure ILM policies in OpenSearch to delete or archive older interruption data.
-
-### Extensibility and Alternative Analytics Tools
-
-While this solution uses Amazon OpenSearch Service for storing and visualizing Spot Interruption data, the architecture is flexible and can be extended to support other analytics and observability platforms. You can modify the Lambda function to forward data to tools such as Amazon QuickSight, Amazon Timestream, Amazon Redshift, or external services like Datadog, Splunk, or Elastic Cloud, depending on your analytics and compliance needs. This enables teams to leverage their preferred tooling for building visualizations, setting alerts, or integrating with existing dashboards.
 
 ## Conclusion
 Spot Interruption Insights empowers teams with the visibility and agility needed to operate confidently with EC2 Spot Instances. By combining a serverless, event-driven architecture with secure, scalable analytics, this solution enables organizations to proactively monitor interruption events, identify trends, and optimize workload strategies for resilience and cost-efficiency. With real-time data at their fingertips, teams can make smarter infrastructure decisions and maximize the benefits of Spot capacity while minimizing disruption risks.
