@@ -50,56 +50,6 @@ This section lists the required setup and configurations **before** deploying th
 - **Certificate ARN for ALB HTTPS Listner -** To configure HTTPS listener.     
 - **AMIId -** Valid EC2 AMI ID for the region.  
 
-Before deploying the solution, ensure that the required Lambda layer containing the requests_aws4auth package is published. This package is essential for AWS request signing, allowing the Lambda function to authenticate API calls made to AWS services such as EC2 and OpenSearch.
-
-To use the layer in your Lambda function, you need the ARN of the published Lambda layer. If the layer is not already published, follow these steps:
-
-The required Lambda layer, containing the requests_aws4auth package, has already been packaged as **requests_aws4auth-layer.zip** and is available in the layers folder of the solution directory. Run the following command to deploy the Lambda layer
-
-    aws lambda publish-layer-version \
-        --layer-name requests_aws4auth_boto3 \
-        --description "Custom layer for aws4auth and requests" \
-        --zip-file fileb://layer/requests_aws4auth-layer.zip \
-        --compatible-runtimes python3.13
-
-**IMPORTANT -** Update the Layers section in the SAM template file "template.yaml" with the **LayerVersionArn** ARN obtained in the previous step and save the file.
-
-By default, the layer is private to your account. You can grant access to:
-
-**A Specific Account:**
-
-    aws lambda add-layer-version-permission \
-        --layer-name requests_aws4auth-layer \
-        --version-number <ver_no> \
-        --statement-id allow-account-usage \
-        --principal 111122223333 \
-        --action lambda:GetLayerVersion
-
-OR
-
-**Your Entire AWS Organization:**
-
-    aws lambda add-layer-version-permission \
-        --layer-name requests_aws4auth-layer \
-        --version-number <ver_no> \
-        --statement-id allow-org-usage \
-        --principal "*" \
-        --action lambda:GetLayerVersion \
-        --organization-id <org-id>
-
-**Replace:**
-- '<ver_no>' with the version you want to grant permission to
-- 111122223333 with the account ID you want to grant access to
-- '<org-id>' with your AWS Org ID (get this from the AWS Organization Console)
-
-
-**Optional: Verify Permissions**
-You can verify who has access:
-
-    aws lambda get-layer-version-policy \
-        --layer-name requests_aws4auth-layer \
-        --version-number <ver_no>
-
 
 **Deploy the solution -** From the command line, use AWS SAM to build and deploy the AWS resources as specified in the template.yml file.  
 
@@ -311,8 +261,6 @@ This solution is designed to be secure and cost-efficient by default, but there 
 
 ### Security Best Practices
 - **Amazon Cognito Authentication :** Integrate Amazon Cognito with OpenSearch Dashboards to manage user authentication, enable MFA, and avoid hardcoding admin credentials.
-
-- **Lambda Layer Versioning:** Ensure pinned versions of Lambda Layers are used to avoid unexpected changes.
 
 - **Logging and Threat Detection:** Enable AWS CloudTrail and Amazon GuardDuty to monitor for unauthorized activity or anomalies.
 
