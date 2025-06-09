@@ -32,11 +32,11 @@ This application uses multiple AWS services, and there are associated costs beyo
 
 Create a new directory, navigate to that directory in a terminal and clone the GitHub repository:  
     
-    git clone https://github.com/aws-samples/spot-interruption-insights
+    git clone https://github.com/aws-samples/sample-spot-interruption-insights
 
 Change directory to the solution directory:  
     
-    cd spot-interruption-insights
+    cd sample-spot-interruption-insights
 
 ## Prerequisites Checklist for Deployment
 
