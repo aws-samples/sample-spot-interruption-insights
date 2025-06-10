@@ -91,7 +91,7 @@ The following steps need to be performed in the OpenSearch Dashboard after loggi
 
 Get the DNS Name of the Application Load Balancer endpoint from the deployment output section or the ALB console. Access the OpenSearch dashboard using the ALB DNS name as follows -
 
-http://**[ALB-DNS-NAME]**/_dashboards
+https://**[ALB-DNS-NAME]**/_dashboards
 
 You will be redirected to the login page. Log in using the Admin username and password you specified during deployment. 
 
