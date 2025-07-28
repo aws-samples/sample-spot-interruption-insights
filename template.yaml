@@ -372,17 +372,17 @@ Resources:
       EngineVersion: OpenSearch_2.17
       ClusterConfig:
         InstanceType: r7g.large.search
-        InstanceCount: 3
+        InstanceCount: 2
         ZoneAwarenessEnabled: true
         ZoneAwarenessConfig:
-          AvailabilityZoneCount: 3
+          AvailabilityZoneCount: 2
         DedicatedMasterEnabled: true
         DedicatedMasterType: m7g.large.search
         DedicatedMasterCount: 3
         WarmEnabled: false
         ColdStorageOptions:
           Enabled: false
-        MultiAZWithStandbyEnabled: true  
+        MultiAZWithStandbyEnabled: false  
       EBSOptions:
         EBSEnabled: true
         VolumeSize: 300
