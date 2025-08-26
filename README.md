@@ -49,6 +49,17 @@ This section lists the required setup and configurations **before** deploying th
 - **ALB Access -** CIDR IP range allowed to access ALB (e.g., `1.2.3.4/32`). This is for accessing the dashboard.
 - **Certificate ARN for ALB HTTPS Listner -** To configure HTTPS listener.     
 - **AMIId -** Valid EC2 AMI ID for the region.  
+- **OpenSearch Service-Linked Role -** Before deploying this template, ensure the AWS OpenSearch service-linked role exists in your account by
+                                       running:
+
+      aws iam create-service-linked-role --aws-service-name es.amazonaws.com 
+
+    **Note:-** 
+    - This command only needs to be run once per AWS account.
+    - If the role already exists, you'll see an error message that can be safely ignored.
+    - This role allows Amazon OpenSearch Service to manage network interfaces in your VPC.
+    - Without this role, deployments that place OpenSearch domains in a VPC will fail with the error: **"Before you can proceed, you must enable a          service-linked role to give Amazon OpenSearch Service permissions to access your VPC."**
+    - The service-linked role is named **"AWSServiceRoleForAmazonOpenSearchService"** and is managed by AWS.
 
 
 **Deploy the solution -** From the command line, use AWS SAM to build and deploy the AWS resources as specified in the template.yml file.  
