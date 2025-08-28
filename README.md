@@ -1,7 +1,7 @@
 # Spot Interruption Insights - Serverless Event-Driven Spot Interruption Monitoring and Analytics Dashboard
 
 ## Introduction 
-Spot Interruption Insights is a serverless, event-driven monitoring and analytics dashboard designed to provide near real-time visibility into EC2 Spot Instance interruptions. Spot Instances offer significant cost savings, but their unpredictable interruptions can lead to operational challenges. This solution captures Spot Interruption warnings via Amazon EventBridge, routes them through SQS, and processes them with AWS Lambda, storing rich event data in OpenSearch for visualization. This dashboard helps teams understand interruption patterns, improve capacity planning, design fallback mechanisms or diversify workloads more effectively, and make informed workload placement decisions.
+Spot Interruption Insights for Auto Scaling Groups is a serverless, event-driven monitoring and analytics dashboard designed to provide near real-time visibility into EC2 Spot Instance interruptions specifically for instances managed by Auto Scaling Groups (ASGs). While Spot Instances offer significant cost savings, their unpredictable interruptions can lead to operational challenges for ASG-managed workloads. This solution captures Spot Interruption warnings via Amazon EventBridge, routes them through SQS, and processes them with AWS Lambda, storing rich event data in OpenSearch for visualization. The dashboard exclusively tracks and analyzes interruption patterns for ASG-launched Spot Instances, helping teams optimize ASG configurations, improve capacity planning for auto-scaled workloads, design effective fallback mechanisms, and make informed decisions about instance type diversification within their Auto Scaling Groups.
 
 
 ## Architecture
