@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 from urllib.parse import urljoin
 from botocore.exceptions import BotoCoreError, ClientError
 
-region = "us-east-1"
+# region = "us-east-1"
+region = os.environ['AWS_REGION']
+print("Current Region - ",region)
 
 # AWS clients
 ec2 = boto3.client("ec2", region_name=region)
@@ -104,7 +106,6 @@ def lambda_handler(event, context):
             body = json.loads(record["body"])
             instance_id = body["detail"]["instance-id"]
             interruption_time = body["time"]
-
             raw_instance_ids.append(instance_id)
             interruption_times[instance_id] = interruption_time
         except Exception as e:
@@ -134,6 +135,7 @@ def lambda_handler(event, context):
 
     # Only process instances associated with an ASG
     valid_instance_ids = list(instance_asg_map.keys())
+    print("Valid instance IDs: " + str(valid_instance_ids))
     
     if not valid_instance_ids:
         print("No instances associated with ASG. Skipping processing.")
