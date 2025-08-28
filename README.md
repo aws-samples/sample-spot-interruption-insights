@@ -48,7 +48,15 @@ This section lists the required setup and configurations **before** deploying th
 - **Outbound Internet Access for Private Subnets -**  Ensure NAT Gateway access as nginx proxy will be installed on EC2 instance in private subnet.
 - **ALB Access -** CIDR IP range allowed to access ALB (e.g., `1.2.3.4/32`). This is for accessing the dashboard.
 - **Certificate ARN for ALB HTTPS Listner -** To configure HTTPS listener.     
-- **AMIId -** Valid EC2 AMI ID for the region.  
+- **AMIId -** Valid EC2 AMI ID for the region.
+    **Note:-**
+    This solution is designed to work exclusively with AMIs that use the DNF package manager. Use the latest Amazon Linux 2023 AMI for optimal compatibility and security.
+    The following AMIs are confirmed compatible with this solution:
+    - Amazon Linux 2023
+    - Fedora (35 and newer)
+    - RHEL 8 and newer
+    - CentOS Stream 8 and newer
+    - Oracle Linux 8 and newer
 - **OpenSearch Service-Linked Role -** Before deploying this template, ensure the AWS OpenSearch service-linked role exists in your account by
                                        running:
 
