@@ -785,8 +785,9 @@ Resources:
                 -newkey rsa:2048 \
                 -keyout /etc/nginx/nginx.key \
                 -out /etc/nginx/nginx.crt \
-                -subj "/CN=${OpenSearchDomain.DomainEndpoint}"
-
+                -subj "/CN=opensearch-proxy" \
+                -addext "subjectAltName=DNS:${OpenSearchDomain.DomainEndpoint}"
+              
               # Log the value of OpenSearchDomain.DomainEndpoint for debugging
               echo "OpenSearchDomain.DomainEndpoint: ${OpenSearchDomain.DomainEndpoint}" >> /var/log/user-data.log
 
